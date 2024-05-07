@@ -7,6 +7,11 @@ from IPython.display import display
 from tqdm.notebook import tqdm
 from einops import rearrange, repeat
 
+try:
+    from diffusers.models.cross_attention import CrossAttention
+except:
+    from diffusers.models.attention import Attention as CrossAttention
+
 
 class ScoreParams:
 
@@ -30,7 +35,7 @@ def get_matrix(size_x, size_y, gap):
 
 
 def get_traceback_matrix(size_x, size_y):
-    matrix = np.zeros((size_x + 1, size_y +1), dtype=np.int32)
+    matrix = np.zeros((size_x + 1, size_y + 1), dtype=np.int32)
     matrix[0, 1:] = 1
     matrix[1:, 0] = 2
     matrix[0, 0] = 4
@@ -63,20 +68,20 @@ def get_aligned_sequences(x, y, trace_back):
     mapper_y_to_x = []
     while i > 0 or j > 0:
         if trace_back[i, j] == 3:
-            x_seq.append(x[i-1])
-            y_seq.append(y[j-1])
-            i = i-1
-            j = j-1
+            x_seq.append(x[i - 1])
+            y_seq.append(y[j - 1])
+            i = i - 1
+            j = j - 1
             mapper_y_to_x.append((j, i))
         elif trace_back[i][j] == 1:
-            x_seq.append('-')
-            y_seq.append(y[j-1])
-            j = j-1
+            x_seq.append("-")
+            y_seq.append(y[j - 1])
+            j = j - 1
             mapper_y_to_x.append((j, -1))
         elif trace_back[i][j] == 2:
-            x_seq.append(x[i-1])
-            y_seq.append('-')
-            i = i-1
+            x_seq.append(x[i - 1])
+            y_seq.append("-")
+            i = i - 1
         elif trace_back[i][j] == 4:
             break
     mapper_y_to_x.reverse()
@@ -92,8 +97,8 @@ def get_mapper(x: str, y: str, tokenizer, max_len=77):
     alphas = torch.ones(max_len)
     alphas[: mapper_base.shape[0]] = mapper_base[:, 1].ne(-1).float()
     mapper = torch.zeros(max_len, dtype=torch.int64)
-    mapper[:mapper_base.shape[0]] = mapper_base[:, 1]
-    mapper[mapper_base.shape[0]:] = len(y_seq) + torch.arange(max_len - len(y_seq))
+    mapper[: mapper_base.shape[0]] = mapper_base[:, 1]
+    mapper[mapper_base.shape[0] :] = len(y_seq) + torch.arange(max_len - len(y_seq))
     return mapper, alphas
 
 
@@ -115,7 +120,9 @@ def get_word_inds(text: str, word_place: int, tokenizer):
         word_place = [word_place]
     out = []
     if len(word_place) > 0:
-        words_encode = [tokenizer.decode([item]).strip("#") for item in tokenizer.encode(text)][1:-1]
+        words_encode = [
+            tokenizer.decode([item]).strip("#") for item in tokenizer.encode(text)
+        ][1:-1]
         cur_len, ptr = 0, 0
 
         for i in range(len(words_encode)):
@@ -128,15 +135,25 @@ def get_word_inds(text: str, word_place: int, tokenizer):
     return np.array(out)
 
 
-def diffusion_step(model, controller, latents, context, t, guidance_scale, low_resource=False):
+def diffusion_step(
+    model, controller, latents, context, t, guidance_scale, low_resource=False
+):
     if low_resource:
-        noise_pred_uncond = model.unet(latents, t, encoder_hidden_states=context[0])["sample"]
-        noise_prediction_text = model.unet(latents, t, encoder_hidden_states=context[1])["sample"]
+        noise_pred_uncond = model.unet(latents, t, encoder_hidden_states=context[0])[
+            "sample"
+        ]
+        noise_prediction_text = model.unet(
+            latents, t, encoder_hidden_states=context[1]
+        )["sample"]
     else:
         latents_input = torch.cat([latents] * 2)
-        noise_pred = model.unet(latents_input, t, encoder_hidden_states=context)["sample"]
+        noise_pred = model.unet(latents_input, t, encoder_hidden_states=context)[
+            "sample"
+        ]
         noise_pred_uncond, noise_prediction_text = noise_pred.chunk(2)
-    noise_pred = noise_pred_uncond + guidance_scale * (noise_prediction_text - noise_pred_uncond)
+    noise_pred = noise_pred_uncond + guidance_scale * (
+        noise_prediction_text - noise_pred_uncond
+    )
     latents = model.scheduler.step(noise_pred, t, latents)["prev_sample"]
     latents = controller.step_callback(latents)
     return latents
@@ -144,7 +161,7 @@ def diffusion_step(model, controller, latents, context, t, guidance_scale, low_r
 
 def latent2image(vae, latents):
     latents = 1 / 0.18215 * latents
-    image = vae.decode(latents)['sample']
+    image = vae.decode(latents)["sample"]
     image = (image / 2 + 0.5).clamp(0, 1)
     image = image.cpu().permute(0, 2, 3, 1).numpy()
     image = (image * 255).astype(np.uint8)
@@ -157,14 +174,16 @@ def init_latent(latent, model, height, width, generator, batch_size):
             (1, model.unet.in_channels, height // 8, width // 8),
             generator=generator,
         )
-    latents = latent.expand(batch_size,  model.unet.in_channels, height // 8, width // 8).to(model.device)
+    latents = latent.expand(
+        batch_size, model.unet.in_channels, height // 8, width // 8
+    ).to(model.device)
     return latent, latents
 
 
 @torch.no_grad()
 def text2image(
     model,
-    prompt:  List[str],
+    prompt: List[str],
     controller,
     num_inference_steps: int = 50,
     guidance_scale: Optional[float] = 7.5,
@@ -172,12 +191,12 @@ def text2image(
     latent: Optional[torch.FloatTensor] = None,
     uncond_embeddings=None,
     start_time=50,
-    return_type='image'
+    return_type="image",
 ):
     batch_size = len(prompt)
     register_attention_control(model, controller)
     height = width = 512
-    
+
     text_input = model.tokenizer(
         prompt,
         padding="max_length",
@@ -189,9 +208,14 @@ def text2image(
     max_length = text_input.input_ids.shape[-1]
     if uncond_embeddings is None:
         uncond_input = model.tokenizer(
-            [""] * batch_size, padding="max_length", max_length=max_length, return_tensors="pt"
+            [""] * batch_size,
+            padding="max_length",
+            max_length=max_length,
+            return_tensors="pt",
         )
-        uncond_embeddings_ = model.text_encoder(uncond_input.input_ids.to(model.device))[0]
+        uncond_embeddings_ = model.text_encoder(
+            uncond_input.input_ids.to(model.device)
+        )[0]
     else:
         uncond_embeddings_ = None
 
@@ -199,12 +223,16 @@ def text2image(
     model.scheduler.set_timesteps(num_inference_steps)
     for i, t in enumerate(tqdm(model.scheduler.timesteps[-start_time:])):
         if uncond_embeddings_ is None:
-            context = torch.cat([uncond_embeddings[i].expand(*text_embeddings.shape), text_embeddings])
+            context = torch.cat(
+                [uncond_embeddings[i].expand(*text_embeddings.shape), text_embeddings]
+            )
         else:
             context = torch.cat([uncond_embeddings_, text_embeddings])
-        latents = diffusion_step(model, controller, latents, context, t, guidance_scale, low_resource=False)
-        
-    if return_type == 'image':
+        latents = diffusion_step(
+            model, controller, latents, context, t, guidance_scale, low_resource=False
+        )
+
+    if return_type == "image":
         image = latent2image(model.vae, latents)
     else:
         image = latents
@@ -219,11 +247,16 @@ def register_attention_control(model, controller):
         else:
             to_out = self.to_out
 
-        def forward(hidden_states, encoder_hidden_states=None, attention_mask=None, **cross_attention_kwargs):
+        def forward(
+            hidden_states,
+            encoder_hidden_states=None,
+            attention_mask=None,
+            **cross_attention_kwargs
+        ):
             x = hidden_states
             context = encoder_hidden_states
             mask = attention_mask
-            
+
             batch_size, sequence_length, dim = x.shape
             h = self.heads
             q = self.to_q(x)
@@ -231,8 +264,15 @@ def register_attention_control(model, controller):
             context = context if is_cross else x
             k = self.to_k(context)
             v = self.to_v(context)
-            
-            if q.shape[0]>2 and not is_cross and 0 <= controller.cur_step <= int(controller.self_output_replace_steps * 50):
+
+            if (
+                q.shape[0] > 2
+                and not is_cross
+                and 0
+                <= controller.cur_step
+                <= int(controller.self_output_replace_steps * 50)
+            ):
+                # NOTE, q, k, v swap, for inversion
                 q[1, :, :] = q[0, :, :]
                 q[3, :, :] = q[2, :, :]
                 k[1, :, :] = k[0, :, :]
@@ -240,7 +280,9 @@ def register_attention_control(model, controller):
                 v[1, :, :] = v[0, :, :]
                 v[3, :, :] = v[2, :, :]
 
-            q, k, v = map(lambda t: rearrange(t, 'b n (h d) -> (b h) n d', h=h), (q, k, v))
+            q, k, v = map(
+                lambda t: rearrange(t, "b n (h d) -> (b h) n d", h=h), (q, k, v)
+            )
             sim = torch.einsum("b i d, b j d -> b i j", q, k) * self.scale
 
             if mask is not None:
@@ -252,7 +294,7 @@ def register_attention_control(model, controller):
             attn = sim.softmax(dim=-1)
             attn = controller(attn, is_cross, place_in_unet)
             out = torch.einsum("b i j, b j d -> b i d", attn, v)
-            out = rearrange(out, '(b h) n d -> b n (h d)', h=h)
+            out = rearrange(out, "(b h) n d -> b n (h d)", h=h)
             return to_out(out)
 
         return forward
@@ -269,10 +311,11 @@ def register_attention_control(model, controller):
         controller = DummyController()
 
     def register_recr(net_, count, place_in_unet):
-        if net_.__class__.__name__ == 'CrossAttention':
+        # if net_.__class__.__name__ == "CrossAttention":
+        if isinstance(net_, CrossAttention):
             net_.forward = ca_forward(net_, place_in_unet)
             return count + 1
-        elif hasattr(net_, 'children'):
+        elif hasattr(net_, "children"):
             for net__ in net_.children():
                 count = register_recr(net__, count, place_in_unet)
         return count
@@ -289,7 +332,7 @@ def register_attention_control(model, controller):
 
     controller.num_att_layers = cross_att_count
 
-    
+
 def get_word_inds(text: str, word_place: int, tokenizer):
     split_text = text.split(" ")
     if type(word_place) is str:
@@ -298,7 +341,9 @@ def get_word_inds(text: str, word_place: int, tokenizer):
         word_place = [word_place]
     out = []
     if len(word_place) > 0:
-        words_encode = [tokenizer.decode([item]).strip("#") for item in tokenizer.encode(text)][1:-1]
+        words_encode = [
+            tokenizer.decode([item]).strip("#") for item in tokenizer.encode(text)
+        ][1:-1]
         cur_len, ptr = 0, 0
 
         for i in range(len(words_encode)):
@@ -311,37 +356,53 @@ def get_word_inds(text: str, word_place: int, tokenizer):
     return np.array(out)
 
 
-def update_alpha_time_word(alpha, bounds: Union[float, Tuple[float, float]], prompt_ind: int,
-                           word_inds: Optional[torch.Tensor]=None):
+def update_alpha_time_word(
+    alpha,
+    bounds: Union[float, Tuple[float, float]],
+    prompt_ind: int,
+    word_inds: Optional[torch.Tensor] = None,
+):
     if type(bounds) is float:
         bounds = 0, bounds
 
     start, end = int(bounds[0] * alpha.shape[0]), int(bounds[1] * alpha.shape[0])
     if word_inds is None:
         word_inds = torch.arange(alpha.shape[2])
-    alpha[: start, prompt_ind, word_inds] = 0
-    alpha[start: end, prompt_ind, word_inds] = 1
+    alpha[:start, prompt_ind, word_inds] = 0
+    alpha[start:end, prompt_ind, word_inds] = 1
     alpha[end:, prompt_ind, word_inds] = 0
     return alpha
 
 
-def get_time_words_attention_alpha(prompts, num_steps,
-                                   cross_replace_steps: Union[float, Dict[str, Tuple[float, float]]],
-                                   tokenizer, max_num_words=77):
-    
+def get_time_words_attention_alpha(
+    prompts,
+    num_steps,
+    cross_replace_steps: Union[float, Dict[str, Tuple[float, float]]],
+    tokenizer,
+    max_num_words=77,
+):
+
     if type(cross_replace_steps) is not dict:
         cross_replace_steps = {"default_": cross_replace_steps}
     if "default_" not in cross_replace_steps:
-        cross_replace_steps["default_"] = (0., 1.)
+        cross_replace_steps["default_"] = (0.0, 1.0)
     alpha_time_words = torch.zeros(num_steps + 1, len(prompts) - 1, max_num_words)
     for i in range(len(prompts) - 1):
-        alpha_time_words = update_alpha_time_word(alpha_time_words, cross_replace_steps["default_"],
-                                                  i)
+        alpha_time_words = update_alpha_time_word(
+            alpha_time_words, cross_replace_steps["default_"], i
+        )
     for key, item in cross_replace_steps.items():
         if key != "default_":
-             inds = [get_word_inds(prompts[i], key, tokenizer) for i in range(1, len(prompts))]
-             for i, ind in enumerate(inds):
-                 if len(ind) > 0:
-                    alpha_time_words = update_alpha_time_word(alpha_time_words, item, i, ind)
-    alpha_time_words = alpha_time_words.reshape(num_steps + 1, len(prompts) - 1, 1, 1, max_num_words)
+            inds = [
+                get_word_inds(prompts[i], key, tokenizer)
+                for i in range(1, len(prompts))
+            ]
+            for i, ind in enumerate(inds):
+                if len(ind) > 0:
+                    alpha_time_words = update_alpha_time_word(
+                        alpha_time_words, item, i, ind
+                    )
+    alpha_time_words = alpha_time_words.reshape(
+        num_steps + 1, len(prompts) - 1, 1, 1, max_num_words
+    )
     return alpha_time_words
